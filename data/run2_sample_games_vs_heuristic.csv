@@ -1,0 +1,5 @@
+run,backend,decisions,sat_out,sat_out_rate,acted,correct,accuracy,chose_up,chose_down,chose_stay,ai_score,opponent_score
+previous_unguided,heuristic,200,3,0.015,197,197,1.0,,,,0,0
+previous_unguided,qwen3-0.6b,200,110,0.55,90,23,0.2556,,,,0,0
+optimal_guided,heuristic,200,3,0.015,197,197,1.0,,,,0,0
+optimal_guided,qwen3-0.6b,200,92,0.46,108,28,0.2593,108,0,0,0,0

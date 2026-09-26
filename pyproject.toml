@@ -1,0 +1,24 @@
+[project]
+name = "jev-pong"
+version = "0.1.0"
+description = "The Jev / OpenJev 'choose, don't generate' pattern, demonstrated on Pong"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# initial_custom_jev_solution.py / optimal_custom_jev_solution.py --backend llama
+llama = ["llama-cpp-python", "huggingface-hub"]
+# open_jev_solution_example.py. openjevpro is pinned to a commit because the
+# PyPI release (0.2.0) lacks the mock client, order invariance and chat mode.
+openjev = [
+    "openjevpro @ git+https://github.com/zhangcy122/OpenJev@68561c3f4cb86ba9aafb16f336e02b52ab1b3212",
+    "llama-cpp-python[server]",
+    "huggingface-hub",
+]
+
+[tool.uv]
+# A collection of scripts, not an installable package.
+package = false

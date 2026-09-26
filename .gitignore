@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.pyc
+llama_server_*.log
+data/.bak/
