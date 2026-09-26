@@ -1,5 +1,5 @@
 [project]
-name = "jev-pong"
+name = "openjev-exploration"
 version = "0.1.0"
 description = "The Jev / OpenJev 'choose, don't generate' pattern, demonstrated on Pong"
 readme = "README.md"
