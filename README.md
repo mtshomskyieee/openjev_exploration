@@ -21,7 +21,7 @@ No text is parsed and no schema is validated. The move is one of the options you
 |---|---|---|---|
 | [`initial_custom_jev_solution.py`](initial_custom_jev_solution.py) | A hand-rolled copy of the OpenJev recipe: prefill a prompt on a local GGUF model, read the logits for `A`/`B`/`C` at the last position, softmax. One forward pass, no sampling. The prompt is a plain description of the board. | `heuristic`, `llama` | `llama` |
 | [`optimal_custom_jev_solution.py`](optimal_custom_jev_solution.py) | The same game and recipe. Only the prompt changes: `Pong.decision_facts()` adds the ball's speeds, the row where it meets the paddle's side, and which way that is. The earlier prompt attempts are kept in the file as `ChainOfThought_GUIDE` and `GUIDE`. | `heuristic`, `llama` | `llama` |
-| [`open_jev_solution_example.py`](open_jev_solution_example.py) | Built on the real [OpenJev](https://github.com/zhangcy122/OpenJev) library (`openjevpro`): `OpenJevProClient.decide_choice()`, an explicit `UNKNOWN` option, `HybridJevGateway` + `TypeSafeJevGuardHarness` as the confidence gate, optional temperature calibration and order-invariant scoring. It starts and stops a local llama-cpp-python server for you. | `openjev`, `mock`, `heuristic` | `openjev` (needed for every backend) |
+| [`open_jev_solution_example.py`](open_jev_solution_example.py) | Built on the real [OpenJev](https://github.com/zhangcy122/OpenJev) library (`openjevpro`): `OpenJevProClient.decide_choice()` over `UP`/`DOWN`/`STAY` only, `HybridJevGateway` + `TypeSafeJevGuardHarness` as the confidence gate, optional temperature calibration and order-invariant scoring. It starts and stops a local llama-cpp-python server for you. | `openjev`, `mock`, `heuristic` | `openjev` (needed for every backend) |
 | [`data/`](data/) | Logs of the runs behind the results below. See [`data/README.md`](data/README.md). | | |
 | [`data-collection-harness.sh`](data-collection-harness.sh) | Replays every run headless, one after another, and regenerates the CSVs in `data/`. `BACKENDS=heuristic` gives a quick check with no model. | `heuristic`, `llama` | `llama` (installed for you) |
 
@@ -98,10 +98,12 @@ Same game, seed 7, 55% gate, Qwen3-0.6B on an 8-core CPU with no GPU. Hand-rolle
 | Hand-rolled, five sample games in prompt | 200 | 92 (46%) | 28/108 (25.9%) | ~8700 ms |
 | Hand-rolled, four rules in prompt | 200 | 3 (1.5%) | 4/197 (2.0%) | not recorded |
 | Hand-rolled, meeting row written out (`decision_facts`) | 200 | 41 (20.5%) | 159/159 (100%) | not recorded |
-| OpenJev, single pass | 200 | 200 (100%) | n/a | 2150 ms |
-| OpenJev, `--calibrate 40` | 30 | 30 (100%) | n/a | 2260 ms |
-| OpenJev, `--order-invariant` | 20 | 20 (100%) | n/a | 3918 ms |
-| OpenJev, `--order-invariant --threshold 0.3` | 20 | 0 (0%) | 10/20 (50%) | 4006 ms |
+| OpenJev with `UNKNOWN` offered, single pass | 200 | 200 (100%) | n/a | 2150 ms |
+| OpenJev with `UNKNOWN` offered, `--calibrate 40` | 30 | 30 (100%) | n/a | 2260 ms |
+| OpenJev with `UNKNOWN` offered, `--order-invariant` | 20 | 20 (100%) | n/a | 3918 ms |
+| OpenJev with `UNKNOWN` offered, `--order-invariant --threshold 0.3` | 20 | 0 (0%) | 10/20 (50%) | 4006 ms |
+| OpenJev, moves only, uncalibrated (before calibration became mandatory) | 30 | 0 (0%) | 14/30 (46.7%) | 1922 ms |
+| OpenJev, moves only, mandatory calibration (30 warm-ups) | 30 | 30 (100%) | n/a | 2327 ms |
 | OpenJev mock client (no model) | 100 | 0 (0%) | 19/100 (19%) | ~0 ms |
 
 The OpenJev rows after the first use 20–30 decisions. Treat them as indications, not benchmarks.
@@ -110,7 +112,7 @@ What the runs showed:
 
 - **The shape of the answer was never the hard part.** A typed move and a probability came back on every run, including the one that played `DOWN` 197 times.
 - **The prompt has to contain the fact the choice depends on.** "Moving toward you and downward" hides two different correct moves. Sample games pulled the model to always choose `UP`, and rules pulled it to always choose `DOWN`. Only stating the meeting row made it accurate. That 100% is the model reading a stated answer, not doing the geometry.
-- **OpenJev turned "confidently wrong" into "abstains", but part of that was position bias.** In a single pass, `UNKNOWN` (the last letter) took 61–83% of the probability. Scored order-invariantly, it came *last* every time, and the three moves came back nearly flat.
+- **OpenJev turned "confidently wrong" into "abstains", but part of that was position bias.** In a single pass, `UNKNOWN` (the last letter) took 61–83% of the probability. Scored order-invariantly, it came *last* every time, and the three moves came back nearly flat. The script no longer offers `UNKNOWN`: abstaining is the gate's job, and a "none of the above" option soaked up the probability whatever the state. Asked for moves only, the model acts on every decision at about 76% confidence while agreeing with perfect play 47% of the time. Calibrating (T = 4.56) flattens that below the gate again, so calibration is now mandatory for the `openjev` backend. Larger models didn't fix it: Qwen3-1.7B and Qwen3-4B also failed from raw coordinates, and 4B only reached 20/20 once the state said whether the ball arrives above, below or inside the paddle.
 - **Calibration measured the problem instead of hiding it.** Fitting on 40 graded decisions pushed the temperature to OpenJev's upper bound (T = 10), which means the scores are close to noise. With position bias removed and a 0.3 gate, the model beat chance a little (50% vs 33%).
 - **The library makes the probability trustworthy. It doesn't supply missing information.** It also costs latency: a single pass took about 2× the hand-rolled recipe, and order invariance about 4×.
 
@@ -140,7 +142,7 @@ Custom scripts: `--backend {auto,llama,heuristic}`. `auto` uses `llama` if it ca
 | `--base-url` | none | Use an existing OpenAI-compatible server (vLLM, SGLang, llama.cpp) instead of launching one |
 | `--model` | `qwen3-0.6b` | Model name to send to that server |
 | `--order-invariant` | off | Score each option in its own isolated YES/NO pass (one request per option) |
-| `--calibrate N` | `0` | Fit the softmax temperature on N warm-up decisions graded against perfect play |
+| `--calibrate N` | `30` for `openjev`, else `0` | Fit the softmax temperature on N warm-up decisions graded against perfect play. Mandatory for `openjev` (N must be at least 1) and announced at startup. |
 
 Lower `--threshold` to watch the model make more of its own mistakes. Raise it to watch the fallback take over.
 
@@ -152,7 +154,7 @@ uv run python initial_custom_jev_solution.py --backend llama --frames 400 --no-r
 uv run python optimal_custom_jev_solution.py --backend llama --frames 400 --no-render     # decision_facts prompt
 
 # OpenJev library
-uv run python open_jev_solution_example.py --frames 400 --no-render                        # single pass
+uv run python open_jev_solution_example.py --frames 400 --no-render                        # mandatory calibration (30), then play
 uv run python open_jev_solution_example.py --calibrate 40 --frames 60 --no-render
 uv run python open_jev_solution_example.py --order-invariant --threshold 0.3 --frames 40 --no-render
 uv run python open_jev_solution_example.py --backend mock --frames 200 --no-render

@@ -17,7 +17,7 @@ options and read the probability it assigns to each one. That is the Choice
 primitive, and it is all this file needs to play a game.
 
 Every few frames the Pong loop hands OpenJev a structured `state` dict and the
-candidates UP / DOWN / STAY / UNKNOWN. What comes back is an openjevpro
+candidates UP / DOWN / STAY. What comes back is an openjevpro
 ChoiceDecision -- a typed value plus a calibrated distribution, never a string
 to parse. The OpenJev pieces in play:
 
@@ -27,15 +27,22 @@ to parse. The OpenJev pieces in play:
                         --order-invariant switches to OpenJev's isolated
                         per-candidate YES/NO scoring (one pass per option).
 
-  TemperatureCalibrator --calibrate N fits the softmax temperature by NLL on N
-                        warm-up decisions graded against perfect play. This is
+  TemperatureCalibrator Fits the softmax temperature by NLL on N warm-up
+                        decisions graded against perfect play. This is
                         post-hoc calibration: it can make confidence honest, it
-                        cannot make a wrong argmax right.
+                        cannot make a wrong argmax right. It is mandatory for
+                        the openjev backend (--calibrate N, default 30):
+                        uncalibrated, Qwen3-0.6B reports ~76% confidence while
+                        agreeing with perfect play ~47% of the time, and the
+                        gate waves those guesses through.
 
   HybridJevGateway      The confidence gate. A TypeSafeJevGuardHarness applies
                         tau = max(--threshold, 1.25 / K); confident decisions
-                        run on the local model (Tier1_Local), everything else --
-                        including an explicit UNKNOWN -- escalates to Tier 2.
+                        run on the local model (Tier1_Local), everything else
+                        escalates to Tier 2. Abstaining is the gate's job, so
+                        UNKNOWN is never offered as a move: small models treat
+                        a "none of the above" option as a catch-all and pile
+                        their probability onto it whatever the state.
                         Here Tier 2 is the closed-form controller, standing in
                         for the human or larger model you would use in
                         production.
@@ -57,7 +64,7 @@ benchmark JevBench measures.
 
 Usage:
     uv run open_jev_solution_example.py                           # Qwen3-0.6B via OpenJev, animated
-    uv run open_jev_solution_example.py --calibrate 40            # fit temperature first
+    uv run open_jev_solution_example.py --calibrate 40            # more warm-up decisions (default 30)
     uv run open_jev_solution_example.py --frames 400 --no-render  # headless stats
     uv run open_jev_solution_example.py --backend heuristic       # no model download
     uv run open_jev_solution_example.py --base-url http://localhost:8000/v1 --model Qwen/Qwen3-4B
@@ -103,9 +110,9 @@ class Move(str, enum.Enum):
     STAY = "STAY"
 
 
-# UNKNOWN is passed explicitly rather than left for the client to append, so the
-# gateway's guard keeps its probability mass and can abstain on it directly.
-CANDIDATES = [m.value for m in Move] + ["UNKNOWN"]
+# Moves only. Every decide_choice() call passes allow_abstain=False so OpenJev
+# does not append UNKNOWN; low confidence is routed by the gateway's tau instead.
+CANDIDATES = [m.value for m in Move]
 
 # Per-candidate criteria. OpenJev renders these into the prompt as a rule list.
 CRITERIA = {
@@ -115,7 +122,6 @@ CRITERIA = {
             "so move the paddle toward the bottom row.",
     "STAY": "The ball will arrive within the rows the paddle already covers, "
             "so hold position.",
-    "UNKNOWN": "The state is ambiguous and no move is clearly best.",
 }
 
 
@@ -188,7 +194,6 @@ class HeuristicEngine:
             "UP": scale if delta < -0.5 else -scale,
             "DOWN": scale if delta > 0.5 else -scale,
             "STAY": 2.0 if abs(delta) <= 0.5 else -scale,
-            "UNKNOWN": -3.0,
         }
         logits = {k: v + self.rng.gauss(0, self.noise) for k, v in logits.items()
                   if k in candidates}
@@ -321,7 +326,7 @@ class Pong:
             "your_paddle": {
                 "edge": "right",
                 "top_row": round(self.right_y),
-                "bottom_row": round(self.right_y + self.paddle_h),
+                "bottom_row": round(self.right_y + self.paddle_h - 1),
             },
         }
 
@@ -402,7 +407,8 @@ def calibrate(engine, n: int, decide_every: int, seed: int, width: int) -> float
     frame = 0
     while len(targets) < n:
         if frame % decide_every == 0:
-            decision = engine.decide_choice(game.state(), CANDIDATES, CRITERIA)
+            decision = engine.decide_choice(game.state(), CANDIDATES, CRITERIA,
+                                           allow_abstain=False)
             logits.append(decision.raw_logits)
             targets.append(game.perfect_move())
             print(f"\r  calibrating {len(targets)}/{n}", end="", file=sys.stderr)
@@ -417,6 +423,10 @@ def calibrate(engine, n: int, decide_every: int, seed: int, width: int) -> float
 # --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
+
+
+# Warm-up decisions for the openjev backend's mandatory calibration.
+DEFAULT_CALIBRATION = 30
 
 
 def bar(p: float, width: int = 18) -> str:
@@ -437,8 +447,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--filename", default="Qwen3-0.6B-Q8_0.gguf")
     ap.add_argument("--order-invariant", action="store_true",
                     help="score each candidate in an isolated pass (one request per option)")
-    ap.add_argument("--calibrate", type=int, default=0, metavar="N",
-                    help="fit the softmax temperature on N warm-up decisions first")
+    ap.add_argument("--calibrate", type=int, default=None, metavar="N",
+                    help="fit the softmax temperature on N warm-up decisions first; "
+                         f"mandatory for the openjev backend (default {DEFAULT_CALIBRATION}), "
+                         "optional otherwise")
     ap.add_argument("--frames", type=int, default=0, help="0 runs until Ctrl-C")
     ap.add_argument("--fps", type=float, default=18.0)
     ap.add_argument("--decide-every", type=int, default=2,
@@ -490,6 +502,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         engine = HeuristicEngine(game, seed=args.seed)
 
+    if backend_kind == "openjev":
+        if args.calibrate is None:
+            args.calibrate = DEFAULT_CALIBRATION
+        elif args.calibrate < 1:
+            ap.error("the openjev backend requires calibration: --calibrate N with N >= 1")
+        print(f"Mandatory calibration: fitting the softmax temperature on {args.calibrate} "
+              "warm-up decisions graded against perfect play before the match starts.\n"
+              "  Uncalibrated model confidence is not honest enough to gate on; "
+              "each warm-up decision is a full model call.",
+              file=sys.stderr)
     if args.calibrate:
         temperature = calibrate(engine, args.calibrate, args.decide_every, args.seed, width)
         print(f"  fitted temperature T = {temperature}", file=sys.stderr)
@@ -524,7 +546,8 @@ def main(argv: list[str] | None = None) -> int:
         while args.frames == 0 or frame < args.frames:
             if frame % args.decide_every == 0:
                 truth = game.perfect_move()
-                decision = gateway.decide_choice(game.state(), CANDIDATES, criteria=CRITERIA)
+                decision = gateway.decide_choice(game.state(), CANDIDATES, criteria=CRITERIA,
+                                                allow_abstain=False)
                 decisions += 1
                 latencies.append(engine.latency_ms)
                 move = decision.choice
@@ -538,8 +561,7 @@ def main(argv: list[str] | None = None) -> int:
                         agreements += 1
                 else:
                     escalations += 1
-                    reason = "UNKNOWN" if shown == "UNKNOWN" else "below tau"
-                    routed = f"ESCALATED ({reason}) -> closed-form"
+                    routed = "ESCALATED (below tau) -> closed-form"
 
             game.apply(move, "right")
             game.step_opponent()
@@ -564,7 +586,10 @@ def main(argv: list[str] | None = None) -> int:
                 ]
                 panel += [
                     "",
-                    f"  confidence {confidence:5.1%}   tau {tau:.0%}   T {temperature:g}",
+                    f"  confidence {confidence:5.1%}   tau {tau:.0%}   T {temperature:g}"
+                    + (f" (calibrated on {args.calibrate}"
+                       + (", mandatory)" if backend_kind == "openjev" else ")")
+                       if args.calibrate else ""),
                     f"  route      {routed}",
                     f"  agreement  {acc:5.1%} over {graded} local decisions",
                     f"  escalated  {escalations}/{decisions}",
